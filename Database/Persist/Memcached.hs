@@ -1,7 +1,7 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
 module Database.Persist.Memcached where
 import Blaze.ByteString.Builder
-import Data.ByteString hiding (take)
+import Data.ByteString hiding (take, intercalate, map, zip)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Database.Persist.Base
@@ -25,6 +25,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Reader
 import Data.List (intercalate)
 import Data.List.Split (splitOn)
+import Data.Maybe
 
 import Database.Persist
 import qualified Database.Persist.GenericKVS as KVS
@@ -43,10 +44,39 @@ newtype KVSPersist m a = KVSPersist { unKVSPersist :: ReaderT Server m a }
 --   Identifier table for an unique name.
 --   Values are separated by ":" after url encoded.
 
+instance (MonadControlIO m) => KVS.KVSBackend (KVSPersist m)
+
 instance (MonadControlIO m) => PersistBackend (KVSPersist m) where
   insert val = do
     let def = entityDef val
-    ident <- get
+        idPath = intercalate "/" ["identifier", entityName def]
+        cols = map (\(a,b,c) -> a) $ entityColumns def
+    mu <- KVS.gets idPath
+    mident <- case mu of
+      Just (uniq, v) -> do
+        let ident = fromJust $ fromValue v :: Int64
+        success <- KVS.cas idPath (toValue $ ident+1) uniq
+        if success then return (Just ident) else return Nothing
+      Nothing -> KVS.set idPath (toValue (0::Int64)) >> return (Just 0)
+    case mident of
+      Nothing -> insert val
+      Just key -> do
+        forM (zip cols $ toPersistFields val) $ \(col, f) -> KVS.set (colPath (entityName def) key col) (toValue f)
+        return $ toPersistKey key
+{-
+  replace key val = do
+    let def = entityDef val
+    KVS.replace 
+-}
+  
+colPath :: String -> Int64 -> String -> String
+colPath eName key col = intercalate "/" ["values", eName, show key, col]
+
+toValue :: PersistField a => a -> ByteString
+toValue = toByteString . buildPersistValue . toPersistValue
+
+fromValue :: PersistField a => ByteString -> Maybe a
+fromValue = either (const Nothing) id . fromPersistValue <=< maybeResult . parse anyPersistValue
 
 buildPersistValue :: PersistValue -> Builder
 buildPersistValue (PersistString str) =

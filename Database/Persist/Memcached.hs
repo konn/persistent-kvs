@@ -1,5 +1,5 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-module Database.Memcached where
+module Database.Persist.Memcached where
 import Blaze.ByteString.Builder
 import Data.ByteString hiding (take)
 import qualified Data.Text as T
@@ -27,6 +27,7 @@ import Data.List (intercalate)
 import Data.List.Split (splitOn)
 
 import Database.Persist
+import qualified Database.Persist.GenericKVS as KVS
 
 instance Serializable PersistValue where
   serialize = toByteString . buildPersistValue

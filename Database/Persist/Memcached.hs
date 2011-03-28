@@ -1,9 +1,23 @@
 {-# LANGUAGE TypeSynonymInstances, TypeFamilies, OverloadedStrings #-}
-{-# LANGUAGE DeriveDataTypeable #-}
-module Database.Persist.Memcached (Memcache, runMemcache) where
+{-# LANGUAGE DeriveDataTypeable, NamedFieldPuns, RecordWildCards #-}
+module Database.Persist.Memcached
+    ( Memcache
+    , MemcacheError
+    , runMemcache
+    , memcache
+    , storage
+    , simpleStorage
+    , Command
+    , Value
+    , valueIter
+    , deleteIter
+    , storeIter
+    ) where
+
 import Database.Persist.GenericKVS
 import Network (connectTo, HostName, PortNumber, PortID(..))
-import Control.Monad.Reader
+import Control.Monad.Trans.Reader
+import Control.Monad
 import System.IO ( Handle(..), hSetNewlineMode, hFlush
                  , hClose, Newline(..), NewlineMode(..))
 import Data.ByteString.Char8 hiding (head, map, snoc)
@@ -15,7 +29,7 @@ import Data.Int
 import Data.Maybe
 import qualified Text.Show.ByteString as Show
 import Control.Applicative
-import Prelude hiding ( length, putStrLn
+import Prelude hiding ( length, putStrLn, putStr
                       , unwords, show, words
                       , concat, getLine, null
                       )
@@ -26,6 +40,7 @@ import Data.Enumerator hiding (map, length)
 import qualified Data.Enumerator.Binary as BE
 import qualified Data.Enumerator.List as LE
 import Control.Concurrent hiding (yield)
+import Blaze.ByteString.Builder
 
 toStrict :: LBS.ByteString -> ByteString
 toStrict = concat . LBS.toChunks
@@ -72,18 +87,14 @@ runMemcache host port act = bracket newConn (liftIO . flip withMVar hClose) (run
 instance (MonadControlIO m) => KVSBackend (Memcache m) where
   type CASUnique (Memcache m) = Int64
   get key = do
-    write $ unwords ["get", key]
-    dats <- memcache valueIter
+    dats <- memcache (Retrieval "get" [key]) valueIter
     return $ liftM valValue $ listToMaybe dats
   gets key = do
-    write $ unwords ["gets", key]
-    dats <- memcache valueIter
+    dats <- memcache (Retrieval "gets" [key]) valueIter
     case listToMaybe dats of
       Just dat -> return $ flip (,) (valValue dat) <$> valUniq dat
       _        -> return Nothing
-  delete key = do
-    write $ unwords ["delete", key]
-    memcache deleteIter
+  delete key = memcache (Delete key False) deleteIter
   set     = simpleStorage "set"
   replace = simpleStorage "replace"
   add     = simpleStorage "add"
@@ -113,10 +124,7 @@ storage :: MonadControlIO m
         -> ByteString  -- ^ Data block
         -> Memcache m Bool
 storage cmd key flag exptime uniq dat = do
-  let len = show $ length dat
-  write $ unwords $ [cmd, key, show flag, show exptime, len] ++ maybeToList (show <$> uniq)
-  write dat
-  memcache storeIter
+  memcache (Storage cmd key flag exptime uniq dat False) storeIter
 
 (=$) :: Monad m => Enumeratee ao ai m b -> Iteratee ai m b -> Iteratee ao m b
 (=$) = (joinI .) . ($$)
@@ -131,7 +139,6 @@ data Command = Storage { _command :: ByteString
                        }
              | Retrieval { _command :: ByteString
                          , keys     :: [ByteString]
-                         , noreply  :: Bool
                          }
              | Delete { key     :: ByteString
                       , noreply :: Bool
@@ -142,6 +149,16 @@ data Command = Storage { _command :: ByteString
                             }
                deriving (Show, Eq, Ord, Data, Typeable)
 
+renderCommand :: Command -> ByteString
+renderCommand Storage{..} =
+  unwords ([_command, key, show flag, show expTime, show $ length cmdBytes]
+             ++ maybeToList (show <$> cmdUniq) ++ if noreply then ["noreply"] else [])
+    `append` "\r\n" `append` cmdBytes `append` "\r\n"
+renderCommand Retrieval{..} = unwords (_command:keys) `append` "\r\n"
+renderCommand Delete{..}    = unwords $ ["delete", key] ++ if noreply then ["noreply"] else [] ++ ["\r\n"]
+renderCommand OtherCommand{..} = unwords (_command:otherArgs ++ if noreply then ["noreply"] else []) `append` "\r\n"
+
+
 command :: Command -> ByteString
 command Delete{} = "delete"
 command cmd      = _command cmd
@@ -151,10 +168,13 @@ data Value = Value { valKey :: ByteString
                    , valUniq :: Maybe Int64 }
            deriving (Show, Eq, Ord)
 
-memcache :: MonadControlIO m => Iteratee ByteString IO a -> Memcache m a
-memcache iter = do
+memcache :: MonadControlIO m => Command -> Iteratee ByteString IO a -> Memcache m a
+memcache cmd iter = do
   conn <- ask
-  liftIO $ withMVar conn $ \h -> run_ (BE.enumHandle 100 h $$ enumLine =$ iter)
+  liftIO $ withMVar conn $ \h -> do
+    hPut h (renderCommand cmd)
+    hFlush h
+    run_ (BE.enumHandle 12 h $$ enumLine =$ iter)
 
 valueIter :: MonadIO m => Iteratee ByteString m [Value]
 valueIter = do
@@ -172,10 +192,3 @@ storeIter = do
   case line of
     Just "STORED" -> return True
     _             -> return False    
-
-write :: MonadIO m => ByteString -> Memcache m ()
-write str = ReaderT $ \mh -> do
-  liftIO $ withMVar mh $ \h -> hPut h str >> hPut h "\r\n" >> hFlush h
-  
-recv :: MonadIO m => Memcache m ByteString
-recv = ReaderT $ \mh -> liftIO (withMVar mh $ \h -> hGetLine h)

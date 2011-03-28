@@ -2,6 +2,8 @@
 {-# LANGUAGE DeriveDataTypeable, NamedFieldPuns, RecordWildCards #-}
 module Database.Persist.Memcached
     ( Memcache
+    , MemcachedPersist
+    , runMemcachedPersist
     , MemcacheError
     , runMemcache
     , memcache
@@ -76,6 +78,11 @@ enumLine = loop
             Nothing -> do
               let remain = rem `append` bytes
               if null remain then yield (Continue k) EOF else k (Chunks [remain]) >>== loop
+
+type MemcachedPersist m = KVSPersist (Memcache m)
+
+runMemcachedPersist :: MonadControlIO m => HostName -> Int -> MemcachedPersist m a -> m a
+runMemcachedPersist host port = runMemcache host port . unKVSPersist
 
 runMemcache :: MonadControlIO m => HostName -> Int -> Memcache m a -> m a
 runMemcache host port act = bracket newConn (liftIO . flip withMVar hClose) (runReaderT act)

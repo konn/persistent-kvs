@@ -1,10 +1,4 @@
 * TODO
-- memcached package doesn't have cas / gets
--- OPTIONS
---- Implement new library
---- Use ZooKeeper
---- http://ghcmutterings.wordpress.com/2008/11/14/comparing-concurrent-linked-list-implementations-in-haskell/
-- KVS interface
--- Provide only Memcached interface?
--- Or, general class for KVS?
---- Need more survey
+** Known Bugs
+- insert function doesn't care about unique Parameter
+-- have to duplication check before register

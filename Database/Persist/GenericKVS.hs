@@ -109,7 +109,7 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
         cols = map (\(a,b,c) -> pack a) $ entityColumns def
     fields <- forM cols $ \colName -> do
       liftM fromJust $ get $ colPath entName (fromPersistKey key) colName
-    either (const $ return Nothing) (return . Just) $ fromPersistValues $ map toPersistValue fields
+    either (const $ return Nothing) (return . Just) $ fromPersistValues $ mapMaybe decodePersistValue fields
 
   getBy (uniq :: Unique val) = do
     let entName = pack $ entityName $ entityDef (undefined :: val)
@@ -118,6 +118,7 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
       Nothing -> return Nothing
       Just i  -> do
         let key = toPersistKey i :: Key val
+        liftIO $ print i
         liftM (liftM ((,) key)) $ P.get key
 
   updateWhere = undefined

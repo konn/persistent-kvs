@@ -20,9 +20,9 @@ import Prelude hiding (take, foldr, length)
 import Control.Exception.Control
 import Control.Monad.IO.Control
 import Control.Monad.IO.Class
-import Control.Monad.Reader
+import Control.Monad
 import Data.Maybe
-import Control.Monad.Trans
+import Control.Monad.Trans.Class
 
 import Database.Persist
 import qualified Database.Persist.GenericKVS as KVS

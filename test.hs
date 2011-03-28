@@ -1,7 +1,7 @@
 {-# LANGUAGE TypeSynonymInstances, OverloadedStrings #-}
 module Main where
 import Test.QuickCheck
-import Database.Memcached
+import Database.Persist.Memcached
 import Data.Attoparsec
 import Blaze.ByteString.Builder
 import Control.Applicative
@@ -17,6 +17,14 @@ import Prelude hiding (length)
 import Data.Monoid
 import Data.Word
 import System.Random
+
+main :: IO ()
+main = do
+  quickCheck prop_doubleSound
+  quickCheck prop_picoSound
+  quickCheck prop_integerSound
+  quickCheck prop_persistSound
+  quickCheck prop_persistInvSound
 
 prop_persistSound :: PersistValue -> Bool
 prop_persistSound v = comp (anyPersistValue) buildPersistValue v == Just v

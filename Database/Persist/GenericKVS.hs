@@ -1,11 +1,11 @@
 {-# LANGUAGE TypeFamilies, GeneralizedNewtypeDeriving, ScopedTypeVariables #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, DeriveDataTypeable #-}
 module Database.Persist.GenericKVS
     ( KVSBackend (..)
     , KVSPersist (..)
     ) where
 import Control.Monad.IO.Control
-import Data.ByteString hiding (pack, map, zip)
+import Data.ByteString hiding (pack, map, zip, null)
 import Control.Monad
 import Control.Monad.Trans.Class
 import Control.Monad.IO.Class
@@ -13,6 +13,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Data.Int
 import Data.Maybe
+import Data.Typeable
+import Control.Exception.Control
 import Prelude hiding (splitAt)
 import qualified Database.Persist.Base as P
 import Database.Persist.Base hiding (replace, get, delete)
@@ -44,6 +46,11 @@ instance (KVSBackend m) => KVSBackend (KVSPersist m) where
   add     = (lift .) . add
   cas     = ((lift .) .) . cas
 
+data KVSError = ConstraintError
+              deriving (Show, Eq, Typeable)
+
+instance Exception KVSError
+
 pack = T.encodeUtf8 . T.pack
 
 -- Strategy:
@@ -55,6 +62,8 @@ pack = T.encodeUtf8 . T.pack
 
 instance (KVSBackend m) => PersistBackend (KVSPersist m) where
   insert val = do
+    exists <- liftM (not . null . catMaybes) $ mapM get $ map uniqPath $ persistUniqueKeys val
+    when exists (throwIO ConstraintError)
     let idPath = intercalate "/" ["identifier", pack $ entityName $ entityDef val]
     mu <- gets idPath
     mident <- case mu of
@@ -72,11 +81,14 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
 
   replace key val = do
     let ident = fromPersistKey key
-    updateUniqueBy replace ident val
+    old <- liftM fromJust $ P.get key
+    updateUniqueBy (const . delete) ident old
+    updateUniqueBy set ident val
     updateColsBy replace ident val
 
   update (key :: Key val) upds = do
     val <- liftM fromJust $ P.get key
+    updateUniqueBy (const . delete) (fromPersistKey key) val
     let def = entityDef val
         entName = pack $ entityName def
         cols = map (\(a,b,c) -> a) $ entityColumns def
@@ -85,7 +97,7 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
         fdic = mapMaybe (\col -> liftM ((,) col) $ lookup col udic `mplus` lookup col oldDic) cols
         ident = (fromPersistKey key)
     a <- either fail return $ fromPersistValues $ map snd fdic
-    updateUniqueBy replace ident (a :: val)
+    updateUniqueBy set ident (a :: val)
     forM_ fdic $ \(col, f) -> replace (colPath entName ident $ T.encodeUtf8 $ T.pack col)
                                       (encodePersistValue f)
     return ()
@@ -118,7 +130,6 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
       Nothing -> return Nothing
       Just i  -> do
         let key = toPersistKey i :: Key val
-        liftIO $ print i
         liftM (liftM ((,) key)) $ P.get key
 
   updateWhere = undefined

@@ -1,4 +1,9 @@
 * TODO
 ** Known Bugs
-- insert function doesn't care about unique Parameter
--- have to duplication check before register
+- All implemented functions appear to be implemented correctly.
+** Not Implemented Functions
+- updateWhere
+- deletWhere
+- slectKeys
+- select
+- count

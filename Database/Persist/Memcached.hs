@@ -1,7 +1,8 @@
-{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving, FlexibleContexts, TypeFamilies, OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables  #-}
 module Database.Persist.Memcached where
 import Blaze.ByteString.Builder
-import Data.ByteString hiding (take, intercalate, map, zip)
+import Data.ByteString hiding (take, map, zip, pack)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import Database.Persist.Base
@@ -16,26 +17,23 @@ import Data.Attoparsec.Binary
 import Control.Applicative
 import Data.Ratio
 import Prelude hiding (take, foldr, length)
-import Network.Memcache
-import Network.Memcache.Serializable
-import Network.Memcache.Protocol
 import Control.Exception.Control
 import Control.Monad.IO.Control
 import Control.Monad.IO.Class
 import Control.Monad.Reader
-import Data.List (intercalate)
-import Data.List.Split (splitOn)
 import Data.Maybe
+import Control.Monad.Trans
 
 import Database.Persist
 import qualified Database.Persist.GenericKVS as KVS
 
-instance Serializable PersistValue where
-  serialize = toByteString . buildPersistValue
-  deserialize = maybeResult . parse anyPersistValue
+pack = T.encodeUtf8 . T.pack
 
-newtype KVSPersist m a = KVSPersist { unKVSPersist :: ReaderT Server m a }
+newtype KVSPersist m a = KVSPersist { unKVSPersist :: m a }
   deriving (Functor, Monad, MonadIO, MonadControlIO)
+
+instance MonadTrans KVSPersist where
+  lift = KVSPersist
 
 -- Strategy:
 -- values/[Entity Name]/[identifier]/[Field Name] : Field Value For Entity
@@ -44,13 +42,23 @@ newtype KVSPersist m a = KVSPersist { unKVSPersist :: ReaderT Server m a }
 --   Identifier table for an unique name.
 --   Values are separated by ":" after url encoded.
 
-instance (MonadControlIO m) => KVS.KVSBackend (KVSPersist m)
+instance (KVS.KVSBackend m) => KVS.KVSBackend (KVSPersist m) where
+  type KVS.CASUnique (KVSPersist m) = KVS.CASUnique m
+  get = lift . KVS.get
+  gets = lift . KVS.gets
+  delete = (lift .) . KVS.delete
+  replace = (lift .) . KVS.replace
+  set = (lift .) . KVS.set
+  add = (lift .) . KVS.add
+  cas = ((lift .) .) . KVS.cas
 
-instance (MonadControlIO m) => PersistBackend (KVSPersist m) where
+instance (KVS.KVSBackend m) => PersistBackend (KVSPersist m) where
   insert val = do
     let def = entityDef val
-        idPath = intercalate "/" ["identifier", entityName def]
+        entName = pack $ entityName def
+        idPath = intercalate "/" ["identifier", pack $ entityName def]
         cols = map (\(a,b,c) -> a) $ entityColumns def
+        fdic  = zip cols (toPersistFields val)
     mu <- KVS.gets idPath
     mident <- case mu of
       Just (uniq, v) -> do
@@ -61,16 +69,51 @@ instance (MonadControlIO m) => PersistBackend (KVSPersist m) where
     case mident of
       Nothing -> insert val
       Just key -> do
-        forM (zip cols $ toPersistFields val) $ \(col, f) -> KVS.set (colPath (entityName def) key col) (toValue f)
+        forM fdic $ \(col, f) -> KVS.set (colPath entName key $ T.encodeUtf8 $ T.pack col) (toValue f)
+        updateUniqueBy KVS.set key val
         return $ toPersistKey key
-{-
+
   replace key val = do
     let def = entityDef val
-    KVS.replace 
--}
+        entName = pack $ entityName def
+        cols = map (\(a,b,c) -> a) $ entityColumns def
+        fdic  = zip cols (toPersistFields val)
+        ident = (fromPersistKey key)
+    updateUniqueBy KVS.replace ident val
+    forM_ fdic $ \(col, f) -> KVS.replace (colPath entName ident $ T.encodeUtf8 $ T.pack col) (toValue f)
+
+  update (key :: Key val) upds = do
+    val <- liftM fromJust $ get key
+    let def = entityDef val
+        entName = pack $ entityName def
+        cols = map (\(a,b,c) -> a) $ entityColumns def
+        udic  = zip (map persistUpdateToFieldName upds) (map persistUpdateToValue upds)
+        oldDic = zip cols (map toPersistValue $ toPersistFields val)
+        fdic = mapMaybe (\col -> liftM ((,) col) $ lookup col udic `mplus` lookup col oldDic) cols
+        ident = (fromPersistKey key)
+    a <- either fail return $ fromPersistValues $ map snd fdic
+    updateUniqueBy KVS.replace ident (a :: val)
+    forM_ fdic $ \(col, f) -> KVS.replace (colPath entName ident $ T.encodeUtf8 $ T.pack col)
+                                          (toByteString $ buildPersistValue f)
+    return ()
+
+updateUniqueBy :: (KVS.KVSBackend m, PersistEntity val)
+               => (ByteString -> ByteString -> m Bool)
+               -> Int64 -> val -> m Bool
+updateUniqueBy setter key val = do
+  let def = entityDef val
+      entName = pack $ entityName def
+      cols = map (\(a,b,c) -> a) $ entityColumns def
+      uniqs = entityUniques def
+      fdic  = zip cols (toPersistFields val)
+  forM uniqs $ \(fname, keys) -> do
+    let val = intercalate ":" $ map (toValue . fromJust . flip lookup fdic) keys
+        uniqPath = intercalate "/" ["uniqs", entName, pack fname]
+    setter uniqPath val
+  return True
   
-colPath :: String -> Int64 -> String -> String
-colPath eName key col = intercalate "/" ["values", eName, show key, col]
+colPath :: ByteString -> Int64 -> ByteString -> ByteString
+colPath eName key col = intercalate "/" ["values", eName, pack $ show key, col]
 
 toValue :: PersistField a => a -> ByteString
 toValue = toByteString . buildPersistValue . toPersistValue

@@ -22,7 +22,8 @@ class MonadControlIO m => KVSBackend m where
   type CASUnique m
   get :: ByteString -> m (Maybe ByteString)
   gets :: ByteString -> m (Maybe (CASUnique m, ByteString))
-  delete, replace, set, add :: ByteString -> ByteString -> m Bool
+  delete :: ByteString -> m Bool
+  replace, set, add :: ByteString -> ByteString -> m Bool
   cas :: ByteString -> ByteString -> CASUnique m -> m Bool
   add = set
   replace = set
@@ -37,7 +38,7 @@ instance (KVSBackend m) => KVSBackend (KVSPersist m) where
   type CASUnique (KVSPersist m) = CASUnique m
   get     = lift . get
   gets    = lift . gets
-  delete  = (lift .) . delete
+  delete  = lift . delete
   replace = (lift .) . replace
   set     = (lift .) . set
   add     = (lift .) . add
@@ -92,15 +93,15 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
   delete (key :: Key val) = do
     val <- liftM fromJust $ P.get key
     let ident = fromPersistKey key
-    updateColsBy delete ident val
-    updateUniqueBy delete ident val
+    updateColsBy (const . delete) ident val
+    updateUniqueBy (const . delete) ident val
     return ()
   
   deleteBy uniq = do
     (key, val) <- liftM fromJust $ P.getBy uniq
     let ident = fromPersistKey key
-    updateColsBy delete ident val
-    updateUniqueBy delete ident val
+    updateColsBy (const . delete) ident val
+    updateUniqueBy (const . delete) ident val
   
   get (key :: Key val) = do
     let def = entityDef (undefined :: val)
@@ -118,6 +119,12 @@ instance (KVSBackend m) => PersistBackend (KVSPersist m) where
       Just i  -> do
         let key = toPersistKey i :: Key val
         liftM (liftM ((,) key)) $ P.get key
+
+  updateWhere = undefined
+  deleteWhere = undefined
+  selectKeys  = undefined
+  select = undefined
+  count = undefined
 
 updateColsBy :: (KVSBackend m, PersistEntity val)
              => (ByteString -> ByteString -> m a)
